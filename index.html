@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Ghar Tracker</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- LOCK SCREEN -->
+  <div id="lockScreen" class="screen">
+    <div class="lock-box">
+      <div class="lock-emoji">🏠</div>
+      <h1 id="lockTitle">Enter passcode</h1>
+      <p id="lockSub" class="muted">Unlock your tracker</p>
+      <input id="lockInput" type="password" inputmode="numeric" placeholder="••••" autocomplete="off">
+      <button id="lockBtn" class="btn-primary">Unlock</button>
+      <p id="lockError" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- APP -->
+  <div id="app" class="screen hidden">
+    <header class="topbar">
+      <h1 id="pageTitle">Today</h1>
+      <button id="logoutBtn" class="icon-btn" title="Lock">🔒</button>
+    </header>
+
+    <main id="main">
+
+      <!-- TODAY TAB -->
+      <section id="tab-today" class="tab">
+        <div class="today-summary" id="todaySummary"></div>
+        <div id="itemsList" class="items-list"></div>
+        <div id="emptyToday" class="empty-state hidden">
+          <p>No items yet.</p>
+          <p class="muted">Add milk, newspaper, water cans, eggs — anything you get regularly.</p>
+          <button class="btn-primary" onclick="goTab('items')">+ Add your first item</button>
+        </div>
+      </section>
+
+      <!-- HISTORY TAB -->
+      <section id="tab-history" class="tab hidden">
+        <div class="month-nav">
+          <button id="prevMonth" class="icon-btn">‹</button>
+          <div id="monthLabel" class="month-label"></div>
+          <button id="nextMonth" class="icon-btn">›</button>
+        </div>
+        <div class="month-total-card" id="monthTotalCard"></div>
+        <div id="historyList" class="history-list"></div>
+        <button id="exportBtn" class="btn-secondary full-width">⬇ Export month (CSV)</button>
+      </section>
+
+      <!-- ITEMS TAB -->
+      <section id="tab-items" class="tab hidden">
+        <button id="addItemBtn" class="btn-primary full-width">+ Add new item</button>
+        <div id="manageList" class="manage-list"></div>
+      </section>
+
+    </main>
+
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-tab="today"><span>🏠</span>Today</button>
+      <button class="nav-btn" data-tab="history"><span>📅</span>History</button>
+      <button class="nav-btn" data-tab="items"><span>⚙️</span>Items</button>
+    </nav>
+  </div>
+
+  <!-- MODAL (item add/edit, qty override, rate/qty change) -->
+  <div id="modalOverlay" class="modal-overlay hidden">
+    <div class="modal-box" id="modalBox"></div>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

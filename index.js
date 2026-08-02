@@ -1,39 +1,54 @@
 /* ============================================================
-   Ghar Tracker — simple local household item tracker
-   No backend. Everything lives in localStorage on this device.
+   Ghar Tracker — household item tracker, synced with Firebase
+   Auth: Firebase email/password
+   Data: Firestore — users/{uid}/items/{itemId}
    ============================================================ */
 
-const STORAGE_KEY = "ghar-tracker-data-v1";
-const PASSCODE_KEY = "ghar-tracker-passcode-v1";
-const SESSION_KEY = "ghar-tracker-unlocked";
+import { firebaseConfig } from "./firebase-config.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, signOut
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFirestore, collection, doc, setDoc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, deleteField
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
 
 const ICONS = ["🥛","📰","💧","🥚","🍞","🧴","🧀","🧃","🛢️","📦","🧻","🧂"];
 
 /* ---------------- date helpers ---------------- */
 function pad(n){ return n < 10 ? "0"+n : ""+n; }
-function toKey(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
-function todayKey(){ return toKey(new Date()); }
+function todayKey(){ const d=new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
 function daysInMonth(y,m){ return new Date(y, m+1, 0).getDate(); }
-function monthLabel(y,m){
-  return new Date(y,m,1).toLocaleDateString(undefined,{month:"long", year:"numeric"});
-}
+function monthLabel(y,m){ return new Date(y,m,1).toLocaleDateString(undefined,{month:"long", year:"numeric"}); }
 
 /* ---------------- state ---------------- */
 let state = { items: [] };
+let currentUser = null;
+let unsubscribeItems = null;
 
-function loadState(){
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    state = raw ? JSON.parse(raw) : { items: [] };
-  } catch(e){ state = { items: [] }; }
-}
-function saveState(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+function itemsCol(){ return collection(db, "users", currentUser.uid, "items"); }
+function itemDoc(id){ return doc(db, "users", currentUser.uid, "items", id); }
+
+function subscribeItems(){
+  const q = query(itemsCol(), orderBy("createdAt"));
+  unsubscribeItems = onSnapshot(q, snap => {
+    state.items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // keep whichever tab is open in sync
+    if(currentTab === "today") renderToday();
+    if(currentTab === "history") renderHistory();
+    if(currentTab === "items") renderItems();
+  }, err => {
+    console.error(err);
+  });
 }
 
-/* ---------------- effective-dated value resolution ----------------
-   history = [{from:"YYYY-MM-DD", val:number}, ...] kept sorted ascending
---------------------------------------------------------------------*/
+/* ---------------- effective-dated value resolution ---------------- */
 function getEffectiveValue(history, dateKey, fallback){
   if(!history || !history.length) return fallback;
   let result = history[0].val;
@@ -43,11 +58,13 @@ function getEffectiveValue(history, dateKey, fallback){
   }
   return result;
 }
-function setEffectiveValue(history, dateKey, val){
-  const idx = history.findIndex(h => h.from === dateKey);
-  if(idx >= 0){ history[idx].val = val; }
-  else { history.push({from: dateKey, val}); }
-  history.sort((a,b) => a.from < b.from ? -1 : 1);
+function withEffectiveValue(history, dateKey, val){
+  const copy = (history || []).map(h => ({...h}));
+  const idx = copy.findIndex(h => h.from === dateKey);
+  if(idx >= 0){ copy[idx].val = val; }
+  else { copy.push({from: dateKey, val}); }
+  copy.sort((a,b) => a.from < b.from ? -1 : 1);
+  return copy;
 }
 
 function getQtyForDate(item, dateKey){
@@ -66,30 +83,35 @@ function getDefaultQtyOnDate(item, dateKey){
   return getEffectiveValue(item.qtyHistory, dateKey, 0);
 }
 
-/* ---------------- item CRUD ---------------- */
-function makeId(){ return "id" + Date.now() + Math.random().toString(16).slice(2,8); }
-
-function addItem({name, unit, icon, qty, rate}){
+/* ---------------- item CRUD (writes only touch the relevant field) ---------------- */
+async function addItem({name, unit, icon, qty, rate}){
   const today = todayKey();
-  state.items.push({
-    id: makeId(),
+  const ref = doc(itemsCol());
+  await setDoc(ref, {
     name, unit, icon: icon || ICONS[state.items.length % ICONS.length],
     qtyHistory: [{from: today, val: qty}],
     rateHistory: [{from: today, val: rate}],
     overrides: {},
     createdAt: today
   });
-  saveState();
 }
-function deleteItem(id){
-  state.items = state.items.filter(i => i.id !== id);
-  saveState();
+async function deleteItem(id){
+  await deleteDoc(itemDoc(id));
 }
-function updateItemBasic(id, {name, unit, icon}){
-  const it = state.items.find(i=>i.id===id);
-  if(!it) return;
-  it.name = name; it.unit = unit; it.icon = icon;
-  saveState();
+async function updateItemBasic(id, {name, unit, icon}){
+  await updateDoc(itemDoc(id), {name, unit, icon});
+}
+async function changeDefaultQty(item, dateKey, qty){
+  await updateDoc(itemDoc(item.id), { qtyHistory: withEffectiveValue(item.qtyHistory, dateKey, qty) });
+}
+async function changeRate(item, dateKey, rate){
+  await updateDoc(itemDoc(item.id), { rateHistory: withEffectiveValue(item.rateHistory, dateKey, rate) });
+}
+async function setOverride(item, dateKey, qty){
+  await updateDoc(itemDoc(item.id), { [`overrides.${dateKey}`]: qty });
+}
+async function clearOverride(item, dateKey){
+  await updateDoc(itemDoc(item.id), { [`overrides.${dateKey}`]: deleteField() });
 }
 
 /* ---------------- rendering ---------------- */
@@ -98,7 +120,7 @@ let historyMonth = new Date().getMonth();
 let historyYear = new Date().getFullYear();
 let openHistoryItemId = null;
 
-function goTab(tab){
+window.goTab = function goTab(tab){
   currentTab = tab;
   document.querySelectorAll(".tab").forEach(t=>t.classList.add("hidden"));
   document.getElementById("tab-"+tab).classList.remove("hidden");
@@ -110,7 +132,7 @@ function goTab(tab){
   if(tab === "today") renderToday();
   if(tab === "history") renderHistory();
   if(tab === "items") renderItems();
-}
+};
 
 function renderToday(){
   const list = document.getElementById("itemsList");
@@ -133,7 +155,6 @@ function renderToday(){
     totalAmt += amt;
     const skipped = qty === 0;
     const overridden = isOverridden(item, tKey);
-    const defaultQty = getDefaultQtyOnDate(item, tKey);
 
     const card = document.createElement("div");
     card.className = "item-card" + (skipped ? " skipped" : "");
@@ -159,19 +180,13 @@ function renderToday(){
   `;
 
   list.querySelectorAll('[data-action="toggle"]').forEach(btn=>{
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const item = state.items.find(i=>i.id===btn.dataset.id);
       const qty = getQtyForDate(item, tKey);
-      if(!item.overrides) item.overrides = {};
-      if(qty === 0){
-        // currently skipped -> restore default (remove override)
-        delete item.overrides[tKey];
-      } else {
-        // mark skipped
-        item.overrides[tKey] = 0;
-      }
-      saveState();
-      renderToday();
+      btn.disabled = true;
+      if(qty === 0){ await clearOverride(item, tKey); }
+      else { await setOverride(item, tKey, 0); }
+      btn.disabled = false;
     };
   });
   list.querySelectorAll('[data-action="editqty"]').forEach(btn=>{
@@ -203,7 +218,7 @@ function renderHistory(){
     const dayLines = [];
     for(let d=1; d<=lastDay; d++){
       const dateKey = historyYear+"-"+pad(historyMonth+1)+"-"+pad(d);
-      if(dateKey < item.createdAt) continue; // item didn't exist yet
+      if(dateKey < item.createdAt) continue;
       const qty = getQtyForDate(item, dateKey);
       const rate = getRateForDate(item, dateKey);
       itemQty += qty;
@@ -317,11 +332,10 @@ function renderItems(){
   list.querySelectorAll('[data-act="editbasic"]').forEach(b=>b.onclick=()=>openEditBasicModal(b.dataset.id));
   list.querySelectorAll('[data-act="changeqty"]').forEach(b=>b.onclick=()=>openChangeQtyModal(b.dataset.id));
   list.querySelectorAll('[data-act="changerate"]').forEach(b=>b.onclick=()=>openChangeRateModal(b.dataset.id));
-  list.querySelectorAll('[data-act="delete"]').forEach(b=>b.onclick=()=>{
+  list.querySelectorAll('[data-act="delete"]').forEach(b=>b.onclick=async ()=>{
     const item = state.items.find(i=>i.id===b.dataset.id);
     if(confirm(`Delete "${item.name}"? This removes all its history.`)){
-      deleteItem(b.dataset.id);
-      renderItems();
+      await deleteItem(b.dataset.id);
     }
   });
 }
@@ -352,16 +366,14 @@ function openAddItemModal(){
   `;
   overlay.classList.remove("hidden");
   document.getElementById("f-cancel").onclick = closeModal;
-  document.getElementById("f-save").onclick = () => {
+  document.getElementById("f-save").onclick = async () => {
     const name = document.getElementById("f-name").value.trim();
     const unit = document.getElementById("f-unit").value.trim();
     const qty = parseFloat(document.getElementById("f-qty").value);
     const rate = parseFloat(document.getElementById("f-rate").value);
     if(!name || !unit || isNaN(qty) || isNaN(rate)){ alert("Please fill all fields."); return; }
-    addItem({name, unit, qty, rate});
+    await addItem({name, unit, qty, rate});
     closeModal();
-    renderItems();
-    if(currentTab==="today") renderToday();
   };
 }
 
@@ -379,14 +391,13 @@ function openEditBasicModal(id){
   `;
   overlay.classList.remove("hidden");
   document.getElementById("f-cancel").onclick = closeModal;
-  document.getElementById("f-save").onclick = () => {
+  document.getElementById("f-save").onclick = async () => {
     const name = document.getElementById("f-name").value.trim();
     const unit = document.getElementById("f-unit").value.trim();
     const icon = document.getElementById("f-icon").value.trim() || item.icon;
     if(!name || !unit){ alert("Name and unit can't be empty."); return; }
-    updateItemBasic(id, {name, unit, icon});
+    await updateItemBasic(id, {name, unit, icon});
     closeModal();
-    renderItems();
   };
 }
 
@@ -405,15 +416,12 @@ function openChangeQtyModal(id){
   `;
   overlay.classList.remove("hidden");
   document.getElementById("f-cancel").onclick = closeModal;
-  document.getElementById("f-save").onclick = () => {
+  document.getElementById("f-save").onclick = async () => {
     const qty = parseFloat(document.getElementById("f-qty").value);
     const date = document.getElementById("f-date").value;
     if(isNaN(qty) || !date){ alert("Please fill all fields."); return; }
-    setEffectiveValue(item.qtyHistory, date, qty);
-    saveState();
+    await changeDefaultQty(item, date, qty);
     closeModal();
-    renderItems();
-    if(currentTab==="today") renderToday();
   };
 }
 
@@ -432,15 +440,12 @@ function openChangeRateModal(id){
   `;
   overlay.classList.remove("hidden");
   document.getElementById("f-cancel").onclick = closeModal;
-  document.getElementById("f-save").onclick = () => {
+  document.getElementById("f-save").onclick = async () => {
     const rate = parseFloat(document.getElementById("f-rate").value);
     const date = document.getElementById("f-date").value;
     if(isNaN(rate) || !date){ alert("Please fill all fields."); return; }
-    setEffectiveValue(item.rateHistory, date, rate);
-    saveState();
+    await changeRate(item, date, rate);
     closeModal();
-    renderItems();
-    if(currentTab==="today") renderToday();
   };
 }
 
@@ -457,22 +462,17 @@ function openQtyOverrideModal(id, dateKey){
     </div>
   `;
   overlay.classList.remove("hidden");
-  document.getElementById("f-reset").onclick = () => {
-    if(item.overrides) delete item.overrides[dateKey];
-    saveState();
+  document.getElementById("f-reset").onclick = async () => {
+    await clearOverride(item, dateKey);
     closeModal();
-    renderToday();
   };
-  document.getElementById("f-save").onclick = () => {
+  document.getElementById("f-save").onclick = async () => {
     const qty = parseFloat(document.getElementById("f-qty").value);
     if(isNaN(qty)){ alert("Enter a valid number."); return; }
-    if(!item.overrides) item.overrides = {};
     const defaultQty = getDefaultQtyOnDate(item, dateKey);
-    if(qty === defaultQty){ delete item.overrides[dateKey]; }
-    else { item.overrides[dateKey] = qty; }
-    saveState();
+    if(qty === defaultQty){ await clearOverride(item, dateKey); }
+    else { await setOverride(item, dateKey, qty); }
     closeModal();
-    renderToday();
   };
 }
 
@@ -484,72 +484,89 @@ function escapeAttr(s){ return escapeHtml(s); }
 
 /* ---------------- nav wiring ---------------- */
 document.querySelectorAll(".nav-btn").forEach(btn=>{
-  btn.onclick = () => goTab(btn.dataset.tab);
+  btn.onclick = () => window.goTab(btn.dataset.tab);
 });
 
-/* ---------------- lock screen ---------------- */
+/* ---------------- auth / login screen ---------------- */
 const lockScreen = document.getElementById("lockScreen");
 const appEl = document.getElementById("app");
-const lockInput = document.getElementById("lockInput");
+const emailInput = document.getElementById("emailInput");
+const passwordInput = document.getElementById("passwordInput");
 const lockBtn = document.getElementById("lockBtn");
 const lockTitle = document.getElementById("lockTitle");
 const lockSub = document.getElementById("lockSub");
 const lockError = document.getElementById("lockError");
+const toggleModeText = document.getElementById("toggleModeText");
+const toggleModeLink = document.getElementById("toggleModeLink");
 
-function hasPasscode(){ return !!localStorage.getItem(PASSCODE_KEY); }
+let mode = "login"; // or "signup"
 
-function setupLockScreen(){
-  if(!hasPasscode()){
-    lockTitle.textContent = "Set a passcode";
-    lockSub.textContent = "This just locks the app on this device — pick anything you'll remember.";
-    lockBtn.textContent = "Set passcode";
-  } else {
-    lockTitle.textContent = "Enter passcode";
-    lockSub.textContent = "Unlock your tracker";
-    lockBtn.textContent = "Unlock";
-  }
+function setMode(m){
+  mode = m;
   lockError.textContent = "";
-  lockInput.value = "";
-}
-
-function tryUnlock(){
-  const val = lockInput.value.trim();
-  if(!val){ lockError.textContent = "Please enter a passcode."; return; }
-  if(!hasPasscode()){
-    if(val.length < 4){ lockError.textContent = "Use at least 4 characters."; return; }
-    localStorage.setItem(PASSCODE_KEY, val);
-    unlockApp();
-    return;
-  }
-  if(val === localStorage.getItem(PASSCODE_KEY)){
-    unlockApp();
+  if(mode === "login"){
+    lockTitle.textContent = "Log in";
+    lockSub.textContent = "Sign in to sync your household items";
+    lockBtn.textContent = "Log in";
+    toggleModeText.textContent = "Don't have an account?";
+    toggleModeLink.textContent = "Sign up";
   } else {
-    lockError.textContent = "Wrong passcode. Try again.";
-    lockInput.value = "";
+    lockTitle.textContent = "Sign up";
+    lockSub.textContent = "Create an account to start tracking";
+    lockBtn.textContent = "Sign up";
+    toggleModeText.textContent = "Already have an account?";
+    toggleModeLink.textContent = "Log in";
   }
 }
-function unlockApp(){
-  sessionStorage.setItem(SESSION_KEY, "1");
-  lockScreen.classList.add("hidden");
-  appEl.classList.remove("hidden");
-  goTab("today");
-}
-lockBtn.onclick = tryUnlock;
-lockInput.addEventListener("keydown", e => { if(e.key === "Enter") tryUnlock(); });
+toggleModeLink.onclick = (e) => { e.preventDefault(); setMode(mode === "login" ? "signup" : "login"); };
 
-document.getElementById("logoutBtn").onclick = () => {
-  sessionStorage.removeItem(SESSION_KEY);
-  appEl.classList.add("hidden");
-  lockScreen.classList.remove("hidden");
-  setupLockScreen();
+function friendlyAuthError(err){
+  const code = err && err.code || "";
+  if(code.includes("invalid-email")) return "That email doesn't look right.";
+  if(code.includes("user-not-found") || code.includes("wrong-password") || code.includes("invalid-credential")) return "Email or password is incorrect.";
+  if(code.includes("email-already-in-use")) return "An account already exists with that email — try logging in.";
+  if(code.includes("weak-password")) return "Password should be at least 6 characters.";
+  return "Something went wrong. Please try again.";
+}
+
+lockBtn.onclick = async () => {
+  const email = emailInput.value.trim();
+  const password = passwordInput.value;
+  if(!email || !password){ lockError.textContent = "Please enter email and password."; return; }
+  lockBtn.disabled = true;
+  lockError.textContent = "";
+  try{
+    if(mode === "login"){
+      await signInWithEmailAndPassword(auth, email, password);
+    } else {
+      await createUserWithEmailAndPassword(auth, email, password);
+    }
+  } catch(err){
+    lockError.textContent = friendlyAuthError(err);
+  } finally {
+    lockBtn.disabled = false;
+  }
 };
+passwordInput.addEventListener("keydown", e => { if(e.key === "Enter") lockBtn.click(); });
+
+document.getElementById("logoutBtn").onclick = () => signOut(auth);
 
 /* ---------------- boot ---------------- */
-loadState();
-if(sessionStorage.getItem(SESSION_KEY) === "1"){
-  lockScreen.classList.add("hidden");
-  appEl.classList.remove("hidden");
-  goTab("today");
-} else {
-  setupLockScreen();
-}
+onAuthStateChanged(auth, (user) => {
+  if(user){
+    currentUser = user;
+    lockScreen.classList.add("hidden");
+    appEl.classList.remove("hidden");
+    subscribeItems();
+    window.goTab("today");
+  } else {
+    if(unsubscribeItems){ unsubscribeItems(); unsubscribeItems = null; }
+    currentUser = null;
+    state.items = [];
+    appEl.classList.add("hidden");
+    lockScreen.classList.remove("hidden");
+    setMode("login");
+    emailInput.value = "";
+    passwordInput.value = "";
+  }
+});

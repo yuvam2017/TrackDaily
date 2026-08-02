@@ -5,14 +5,13 @@
 // 5. Paste your values here, replacing the placeholders.
 
 export const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
-};
-
+    apiKey: "AIzaSyCoemVixpcz-2HFkuYF3fhfFGgbNF4FtQc",
+    authDomain: "trackerdaily-8b722.firebaseapp.com",
+    projectId: "trackerdaily-8b722",
+    storageBucket: "trackerdaily-8b722.firebasestorage.app",
+    messagingSenderId: "269612666261",
+    appId: "1:269612666261:web:c081eb2a58ae7003cf3a9c"
+  };
 // 6. In Firestore → Rules tab, paste this and Publish (locks data to each signed-in user only):
 //
 // rules_version = '2';
